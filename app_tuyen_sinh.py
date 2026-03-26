@@ -6,12 +6,10 @@ import numpy as np
 from PIL import Image
 import io
 
-st.set_page_config(page_title="Quét Phiếu Tuyển Sinh TBD", layout="wide")
-st.title("📑 Trích xuất Thông tin Phiếu Đăng ký Tuyển sinh - ĐH Thái Bình Dương")
+st.set_page_config(page_title="TBD - Trạm Nhập Liệu Tuyển Sinh", layout="wide")
+st.title("📑 Trạm Nhập Liệu Tuyển Sinh - ĐH Thái Bình Dương")
 
-# Định nghĩa Tọa độ các ô cần trích xuất (ROI - Regions of Interest)
-# Tọa độ: (x, y, chiều_rộng, chiều_cao). Đơn vị là % của ảnh gốc để đảm bảo độ chính xác.
-# *Lưu ý: Tọa độ này dựa trên ảnh mẫu của bạn, có thể cần tinh chỉnh nếu phiếu thay đổi.*
+# Định nghĩa Tọa độ vùng cắt (giữ nguyên như bản trước)
 ROI_LAYOUT = {
     "Họ và Tên":     (0.208, 0.106, 0.281, 0.038),
     "Ngày sinh":     (0.631, 0.106, 0.207, 0.038),
@@ -20,19 +18,24 @@ ROI_LAYOUT = {
     "Email":          (0.208, 0.166, 0.281, 0.038),
     "Số CC/CCCD":    (0.631, 0.166, 0.207, 0.038),
     "Địa chỉ liên hệ": (0.208, 0.196, 0.630, 0.038),
-    # "Ngành/Chuyên ngành" và "Học bổng" phức tạp hơn, có thể cần AI chuyên dụng 
-    # để nhận diện dấu tick và khoanh tròn, tạm thời chưa bao gồm trong code này.
 }
 
-def preprocess_for_ocr(crop_img):
-    """Hàm xử lý ảnh nâng cao cho từng ô nhỏ"""
+def preprocess_for_viewing(crop_img):
+    """Hàm xử lý ảnh để mắt người nhìn rõ nhất (không dùng Threshold)"""
     gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
-    # Khử nhiễu mạnh cho ô nhỏ
-    denoised = cv2.fastNlMeansDenoising(gray, h=15)
-    # Phóng to để nét chữ to hơn (giúp Tesseract đọc tốt hơn)
-    resized = cv2.resize(denoised, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
-    # Chuyển về trắng đen chuẩn (Adaptive Thresholding)
-    binary = cv2.adaptiveThreshold(resized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 10)
+    # Tăng độ tương phản một chút
+    alpha = 1.3 # Contrast control (1.0-3.0)
+    beta = 0   # Brightness control (0-100)
+    adjusted = cv2.convertScaleAbs(gray, alpha=alpha, beta=beta)
+    # Phóng to ảnh để nhìn rõ nét chữ
+    resized = cv2.resize(adjusted, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_CUBIC)
+    return resized
+
+def preprocess_for_ocr(crop_img):
+    """Hàm xử lý ảnh để máy đọc (Thresholding)"""
+    gray = cv2.cvtColor(crop_img, cv2.COLOR_BGR2GRAY)
+    resized = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    binary = cv2.adaptiveThreshold(resized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 10)
     return binary
 
 uploaded_file = st.file_uploader("Tải lên ảnh chụp phiếu đăng ký (Chụp thẳng, rõ nét)...", type=["jpg", "jpeg", "png"])
@@ -41,16 +44,19 @@ if uploaded_file is not None:
     # Đọc ảnh sang định dạng OpenCV
     file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
     original_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    
-    # Hiển thị ảnh gốc
-    st.image(original_img, caption='Ảnh đã tải lên', use_container_width=True, channels="BGR")
-    
     height, width, _ = original_img.shape
     extracted_data = {}
     
+    # Hiển thị ảnh gốc ở sidebar để đối chiếu nếu cần
+    st.sidebar.image(original_img, caption='Ảnh gốc', use_container_width=True, channels="BGR")
+    st.sidebar.markdown("---")
+    st.sidebar.info("Mẹo: Nhấn `Tab` để di chuyển nhanh giữa các ô nhập liệu.")
+
     with st.spinner("Đang trích xuất dữ liệu..."):
-        st.subheader("Bản xem trước dữ liệu (Bạn có thể sửa lỗi)")
-        cols = st.columns(2) # Hiển thị 2 ô trên một dòng cho gọn
+        st.subheader("Nhập liệu và đối chiếu (Sửa lỗi chính tả ngay tại đây)")
+        
+        # Tạo giao diện lưới để hiển thị ảnh cắt và ô nhập liệu
+        cols = st.columns(2) # 2 trường trên một dòng cho gọn
         
         for idx, (field_name, roi_pct) in enumerate(ROI_LAYOUT.items()):
             # Chuyển tọa độ % sang pixel
@@ -60,22 +66,26 @@ if uploaded_file is not None:
             # Cắt ảnh
             crop_img = original_img[iy:iy+ih, ix:ix+iw]
             
-            # Xử lý ảnh nâng cao (Pre-processing)
-            binary_img = preprocess_for_ocr(crop_img)
+            # Xử lý ảnh để mắt nhìn rõ (Không dùng Threshold)
+            view_img = preprocess_for_viewing(crop_img)
             
-            # Đọc OCR trên ô đã xử lý
-            # config='--psm 7' cho Tesseract biết đây là một dòng chữ đơn lẻ
-            config = '--psm 7'
-            text = pytesseract.image_to_string(binary_img, lang='vie+eng', config=config)
+            # Xử lý ảnh để máy đọc (Dùng Threshold)
+            ocr_img = preprocess_for_ocr(crop_img)
             
-            # Hiển thị ô ảnh và nội dung đọc được để người dùng kiểm tra
+            # Đọc chữ bằng OCR (Mặc định nếu Tesseract không đọc được gì thì để trống)
+            config = '--psm 7' # Đọc một dòng chữ
+            raw_text = pytesseract.image_to_string(ocr_img, lang='vie+eng', config=config).strip()
+            
+            # Hiển thị ảnh và ô nhập liệu
             with cols[idx % 2]:
-                st.image(binary_img, caption=field_name, use_container_width=True, channels="GRAY")
-                extracted_data[field_name] = st.text_input(f"Sửa lỗi cho: {field_name}", text.strip())
+                # Hiển thị ảnh cắt
+                st.image(view_img, caption=f"Đối chiếu: {field_name}", use_container_width=True, channels="GRAY")
+                # Ô nhập liệu cho phép sửa
+                extracted_data[field_name] = st.text_input(f"Nhập/Sửa {field_name}", raw_text, key=field_name)
 
     # --- TẠO FILE EXCEL CHUẨN ---
     st.markdown("---")
-    st.subheader("Dữ liệu cuối cùng (sẵn sàng tải xuống):")
+    st.subheader("Bảng dữ liệu cuối cùng (Sẵn sàng tải xuống)")
     df = pd.DataFrame([extracted_data])
     st.dataframe(df, use_container_width=True)
 
@@ -84,8 +94,8 @@ if uploaded_file is not None:
     towrite.seek(0)
     
     st.download_button(
-        label="📥 Tải xuống file Excel (.xlsx)",
+        label="📥 Tải xuống File Excel (.xlsx)",
         data=towrite,
-        file_name="thong_tin_tuyen_sinh_TBD.xlsx",
+        file_name="du_lieu_tuyen_sinh_TBD.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
